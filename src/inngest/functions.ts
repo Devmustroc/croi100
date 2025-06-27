@@ -1,29 +1,35 @@
 import { inngest } from "./client";
 import {
   openai,
-  createAgent, createTool, createNetwork
+  createAgent, createTool, createNetwork, type Tool
 } from "@inngest/agent-kit";
 import { z } from "zod";
 import { Sandbox } from '@e2b/code-interpreter';
 import {getSandbox, lastAssistantTextMessageContent} from "@/inngest/utils";
 import {PROMPT} from "@/prompt";
+import {prisma} from "@/lib/db";
+
+interface AgentState {
+  summary: string;
+  files: { [path: string]: string };
+};
 
 
 
-export const helloWorld = inngest.createFunction(
-  { id: "hello-mustapha" },
-  { event: "test/hello.world" },
+export const codeAgentFunction = inngest.createFunction(
+  { id: "code-agent" },
+  { event: "code-agent/run" },
   async ({ event, step }) => {
     const sanboxId = await step.run("get-sandbox-id", async () => {
       const sandbox = await Sandbox.create("croi100-nextjs-test-2");
       return sandbox.sandboxId
     });
 
-    const codeAgent = createAgent({
+    const codeAgent = createAgent<AgentState>({
       name: "code-agent",
       description: "An software engineer that can write code, run it in a sandbox, and read files.",
       system: PROMPT,
-      model: openai({ model: "anthropic/claude-sonnet-4", baseUrl: process.env.OPENAI_API_BASE , apiKey: process.env.OPENAI_API_KEY, defaultParameters: {
+      model: openai({ model: "anthropic/claude-3.7-sonnet", baseUrl: process.env.OPENAI_API_BASE , apiKey: process.env.OPENAI_API_KEY, defaultParameters: {
         temperature: 0.1,
       }}),
       tools: [
@@ -68,7 +74,7 @@ export const helloWorld = inngest.createFunction(
               }),
             ),
           }),
-          handler: async ({ files }, { step, network }) => {
+          handler: async ({ files }, { step, network } : Tool.Options<AgentState>) => {
             const newFiles = await step?.run("createOrUpdateFiles", async () => {
               try {
                 const updatedFiles = network.state.data.files ?? {};
@@ -132,7 +138,7 @@ export const helloWorld = inngest.createFunction(
       }
     });
 
-    const network = createNetwork({
+    const network = createNetwork<AgentState>({
       name: 'code-agent-network',
       agents: [codeAgent],
       maxIter: 8,
@@ -147,7 +153,9 @@ export const helloWorld = inngest.createFunction(
       }
     })
 
-    const result = await network.run(event.data?.value || "")
+    const result = await network.run(event.data.value)
+
+    const isError = !result.state.data.summary || Object.keys(result.state.data.files ?? {}).length === 0
 
     const sandboxUrl = await step.run('get-sandbox-url', async () => {
       const sandbox = await getSandbox(sanboxId);
@@ -155,7 +163,39 @@ export const helloWorld = inngest.createFunction(
       const host = sandbox.getHost(3000);
 
       return `https//${host}`;
-    })
+    });
+
+
+    await step.run("save-result", async () => {
+
+      if (isError) {
+        const error = prisma.message.create({
+          data: {
+            content: "Something went wrong. Please try again.",
+            role: "ASSISTANT",
+            type: "ERROR",
+          }
+        })
+
+        return error;
+      }
+      // Save the result to the database or any other storage
+      // This is a placeholder for your actual save logic
+      await prisma.message.create({
+        data: {
+          content: result.state.data.summary,
+          role: "ASSISTANT",
+          type: "RESULT",
+          fragments: {
+            create: {
+              sandboxUrl: sandboxUrl,
+              title: 'Fragment',
+              files: result.state.data.files ?? {},
+            }
+          }
+        }
+      })
+    });
 
     return {
       url: sandboxUrl,

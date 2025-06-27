@@ -1,11 +1,16 @@
 "use client";
 
 import {Button} from "@/components/ui/button";
+import {Input} from "@/components/ui/input";
+import React from "react";
 import {useTRPC} from "@/trpc/client";
 import {useMutation} from "@tanstack/react-query";
 import {toast} from "sonner";
 
 const Page = () => {
+
+  const [value, setValue] = React.useState("");
+
   const trpc = useTRPC();
   const invoke = useMutation(trpc.invoke.mutationOptions({
     onSuccess: (data) => {
@@ -25,9 +30,15 @@ const Page = () => {
     <div
       className="p-4 max-w-7xl mx-auto"
     >
+      <Input
+        value={value}
+        placeholder="Enter text to invoke function"
+        className="mb-4"
+        onChange={(e) => setValue(e.target.value)}
+      />
       <Button
         disabled={invoke.isPending}
-        onClick={() => invoke.mutate({ text: "world mustapha" })}
+        onClick={() => invoke.mutate({ value: value })}
       >
         Invoke Inngest Function
       </Button>

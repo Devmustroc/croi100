@@ -1,41 +1,50 @@
-import { inngest } from "./client";
-import {
-  openai,
-  createAgent, createTool, createNetwork
-} from "@inngest/agent-kit";
-import { z } from "zod";
-import { Sandbox } from '@e2b/code-interpreter';
+import {inngest} from "./client";
+import {createAgent, createNetwork, createTool, openai, type Tool} from "@inngest/agent-kit";
+import {z} from "zod";
+import {Sandbox} from '@e2b/code-interpreter';
 import {getSandbox, lastAssistantTextMessageContent} from "@/inngest/utils";
 import {PROMPT} from "@/prompt";
+import {prisma} from "@/lib/db";
+
+interface AgentState {
+  summary: string;
+  files: {
+    [path: string]: string;
+  }
+}
 
 
-
-export const helloWorld = inngest.createFunction(
-  { id: "hello-mustapha" },
-  { event: "test/hello.world" },
-  async ({ event, step }) => {
+export const codeAgentFunction = inngest.createFunction(
+  {id: "code-agent"},
+  {event: "code-agent/run"},
+  async ({event, step}) => {
     const sanboxId = await step.run("get-sandbox-id", async () => {
       const sandbox = await Sandbox.create("croi100-nextjs-test-2");
       return sandbox.sandboxId
     });
 
-    const codeAgent = createAgent({
+    const codeAgent = createAgent<AgentState>({
       name: "code-agent",
       description: "An software engineer that can write code, run it in a sandbox, and read files.",
       system: PROMPT,
-      model: openai({ model: "anthropic/claude-sonnet-4", baseUrl: process.env.OPENAI_API_BASE , apiKey: process.env.OPENAI_API_KEY, defaultParameters: {
-        temperature: 0.1,
-      }}),
+      model: openai({
+        model: "openai/gpt-4.1",
+        baseUrl: process.env.OPENAI_API_BASE,
+        apiKey: process.env.OPENAI_API_KEY,
+        defaultParameters: {
+          temperature: 0.1,
+        }
+      }),
       tools: [
         createTool({
           name: 'terminal',
           description: "use the terminal to run commands",
-          parameters : z.object({
+          parameters: z.object({
             command: z.string()
           }),
-          handler: async ({ command }, { step }) => {
+          handler: async ({command}, {step}) => {
             return await step?.run('terminal', async () => {
-              const buffers = { stdout: "", stderr: "" };
+              const buffers = {stdout: "", stderr: ""};
 
               try {
                 const sandbox = await getSandbox(sanboxId);
@@ -68,7 +77,7 @@ export const helloWorld = inngest.createFunction(
               }),
             ),
           }),
-          handler: async ({ files }, { step, network }) => {
+          handler: async ({files}, {step, network}: Tool.Options<AgentState>) => {
             const newFiles = await step?.run("createOrUpdateFiles", async () => {
               try {
                 const updatedFiles = network.state.data.files ?? {};
@@ -97,7 +106,7 @@ export const helloWorld = inngest.createFunction(
           parameters: z.object({
             files: z.array(z.string()).describe("The paths of the files to read"),
           }),
-          handler: async ({ files }, { step }) => {
+          handler: async ({files}, {step}) => {
             return await step?.run('readFiles', async () => {
               try {
                 const sandbox = await getSandbox(sanboxId);
@@ -105,7 +114,7 @@ export const helloWorld = inngest.createFunction(
 
                 for (const file of files) {
                   const content = await sandbox.files.read(file);
-                  contents.push({ path: file, content });
+                  contents.push({path: file, content});
                 }
 
                 return JSON.stringify(contents);
@@ -118,7 +127,7 @@ export const helloWorld = inngest.createFunction(
         })
       ],
       lifecycle: {
-        onResponse: async ({ result, network }) => {
+        onResponse: async ({result, network}) => {
           const lastAssistantMessageText = lastAssistantTextMessageContent(result);
 
           if (lastAssistantMessageText && network) {
@@ -132,11 +141,11 @@ export const helloWorld = inngest.createFunction(
       }
     });
 
-    const network = createNetwork({
+    const network = createNetwork<AgentState>({
       name: 'code-agent-network',
       agents: [codeAgent],
       maxIter: 8,
-      router: async ({ network }) => {
+      router: async ({network}) => {
         const summary = network.state.data.summary;
 
         if (summary) {
@@ -147,7 +156,10 @@ export const helloWorld = inngest.createFunction(
       }
     })
 
-    const result = await network.run(event.data?.value || "")
+    const result = await network.run(event.data.value);
+
+    const isError = !result.state.data.summary
+    || Object.keys(result.state.data.files ?? {}).length === 0;
 
     const sandboxUrl = await step.run('get-sandbox-url', async () => {
       const sandbox = await getSandbox(sanboxId);
@@ -155,7 +167,33 @@ export const helloWorld = inngest.createFunction(
       const host = sandbox.getHost(3000);
 
       return `https//${host}`;
-    })
+    });
+
+    await step.run('save-result', async () => {
+      if (isError) {
+        return prisma.message.create({
+          data: {
+            content: "An error occurred while processing your request.",
+            role: "ASSISTANT",
+            type: "ERROR",
+          },
+        });
+      }
+      return prisma.message.create({
+        data: {
+          content: result.state.data.summary,
+          role: "ASSISTANT",
+          type: "RESULT",
+          fragments: {
+            create: {
+              sandboxUrl: sandboxUrl,
+              title: "Fragment of code",
+              files: result.state.data.files,
+            }
+          }
+        },
+      });
+    });
 
     return {
       url: sandboxUrl,

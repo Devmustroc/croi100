@@ -30,7 +30,7 @@ interface MessageCardProps {
   fragments: Fragment | null;
   createdAt: Date;
   isActive?: boolean;
-  onFragmentClick: (fragment: Fragment) => void;
+  onFragmentClick: (fragment: Fragment) => void | null;
   type: MessageType;
 }
 
